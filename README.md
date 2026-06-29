@@ -289,3 +289,35 @@ Note: `ebe34f07` shows `status: under_review` — this submission had an appeal 
 - All SQLite queries use parameterized `?` placeholders — no string interpolation in SQL
 - LLM prompt wraps user text in `<content_to_analyze>` delimiters to prevent prompt injection
 - LLM response is validated as a float in `[0.0, 1.0]` before use; raises an exception if invalid
+
+## Known Limitations
+
+**Formal human writing misclassified as AI-generated.**
+Academic essays, legal documents, and professional reports share the same statistical profile that the stylometric signal associates with AI output — low sentence length variance, controlled vocabulary, and uniform punctuation. A student submitting a well-structured research paper could receive an "uncertain" or even "likely AI-generated" label despite the work being entirely their own. This happens because the stylometric signal measures uniformity, not intent — it cannot distinguish between "uniform because AI" and "uniform because carefully edited." The LLM signal can partially compensate by reading tone and naturalness, but formal human writing is precisely the category where the LLM is also most likely to find the text "polished and coherent." Both signals can fail in the same direction on this content type.
+
+**Adversarially casual AI output misclassified as human-written.**
+If a user prompts an LLM to write in a deliberately messy, informal style — with sentence fragments, irregular punctuation, and colloquial language — the resulting text can have high sentence variance and diverse punctuation patterns that the stylometric signal associates with human writing. The LLM signal may also find the casual tone convincing. This is a known, unsolvable limitation of any current AI detection system. The system's wide uncertain band (0.45–0.75) and appeals workflow exist precisely because no classifier is perfect — creators who are misclassified have a documented path to contest the label.
+
+---
+
+## Spec Reflection
+
+**One way the spec helped:** The planning document's requirement to define exact confidence thresholds before writing any code was the most useful constraint in the project. Having the 0.75 and 0.45 cutoffs decided upfront meant the label generation function had concrete rules to implement against, rather than requiring judgment calls mid-implementation. It also made testing straightforward — I could deliberately construct inputs targeting each band and verify the right label appeared.
+
+**One way implementation diverged from the plan:** The planning document specified that the LLM signal should raise an exception if the response is not a valid float, with the intent of surfacing problems loudly during development. In practice, the Groq API occasionally returned responses where the JSON was valid but the score value was slightly outside the 0.0–1.0 range due to floating point representation (e.g., 1.0000000002). Treating these as hard exceptions caused unnecessary failures on otherwise good responses. The implementation was updated to clamp the value to [0.0, 1.0] after validation rather than rejecting it outright — a small but meaningful divergence from the original spec that made the system more robust without compromising correctness.
+
+---
+
+## AI Usage
+
+**Instance 1: Generating the Flask skeleton and LLM signal function**
+
+I directed Claude to generate the Flask app skeleton (`app.py`), the `classify_with_llm()` function in `signals.py`, the SQLite database setup in `database.py`, and the `GET /log` endpoint. I provided my planning.md's detection signals section and architecture diagram as context, and specified that the LLM prompt must wrap user text in `<content_to_analyze>` XML delimiters for prompt injection protection and that all database writes must use parameterized `?` queries.
+
+What I revised: The generated `classify_with_llm()` function returned the raw JSON object from Groq rather than extracting the float score. I updated it to parse `response.content[0].text`, load it as JSON, and extract the `score` key explicitly. I also added the float range validation step (clamping to [0.0, 1.0]) which the generated code omitted. The database schema the AI generated used `TEXT` for the confidence column — I changed it to `REAL` so SQLite stores it as a proper float for numeric comparisons.
+
+**Instance 2: Generating the transparency label function and appeals endpoint**
+
+I directed Claude to generate the `generate_label()` function in `scoring.py` and the `POST /appeal` endpoint in `app.py`, providing the exact label text for all three variants from my planning.md and the appeals workflow section specifying that status must update to `"under_review"` and a separate appeals table must be written to.
+
+What I revised: The generated `generate_label()` function displayed the raw confidence float directly in the label text (e.g., "confidence: 0.766") rather than converting it to a rounded percentage. I updated it to use `round(confidence * 100)` for the AI and uncertain labels and `round((1 - confidence) * 100)` for the human label, matching the spec. The appeals endpoint the AI generated did not return a 404 when an invalid `content_id` was submitted — it silently inserted an appeal record with a null foreign key. I added the lookup-first check and the 404 response before any write occurs.
